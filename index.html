@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Night Shift Heist</title>
+<style>
+:root{--bg:#0b0d14;--fg:#e8e6df;--muted:#8d93a5;--accent:#f2c14e;--danger:#e5484d;--ok:#46c37b;--panel:#151a26;--line:#2a3247}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:hidden}
+#wrap{position:relative;width:min(100vw,calc(100vh*1024/700));aspect-ratio:1024/700;margin:0 auto;top:50%;transform:translateY(-50%)}
+canvas{width:100%;height:100%;display:block}
+#ov{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(5,7,12,.86);padding:16px}
+#ov.hide{display:none}
+.panel{max-width:760px;width:100%;text-align:center}
+h1{font-size:clamp(28px,5vw,52px);margin:0 0 4px;color:var(--accent);letter-spacing:2px}
+h2{font-size:clamp(20px,3vw,30px);margin:0 0 8px}
+p{color:var(--muted);line-height:1.5;margin:6px 0}
+.keys{display:inline-grid;grid-template-columns:auto auto;gap:4px 14px;text-align:left;margin:12px 0;color:var(--fg);font-size:14px}
+.keys b{color:var(--accent)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:16px 0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;cursor:pointer;color:var(--fg);font:inherit;text-align:left;transition:transform .1s,border-color .1s}
+.card:hover:not(:disabled){transform:translateY(-3px);border-color:var(--accent)}
+.card:disabled{opacity:.4;cursor:default}
+.card .n{font-weight:700;color:var(--accent);margin-bottom:6px}
+.card .d{font-size:13px;color:var(--muted)}
+.card .c{margin-top:10px;font-size:13px}
+button.go{background:var(--accent);color:#1a1405;border:0;border-radius:8px;padding:12px 26px;font:inherit;font-weight:700;font-size:16px;cursor:pointer;margin-top:8px}
+button.go:hover{filter:brightness(1.1)}
+.stat{color:var(--fg)}
+.money{color:var(--ok)}
+.bad{color:var(--danger)}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c" width="1024" height="700"></canvas>
+  <div id="ov"><div class="panel" id="panel"></div></div>
+</div>
+<script>
+// ---------- constants & helpers ----------
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const ov = document.getElementById('ov'), panel = document.getElementById('panel');
+const T = 32, W = 32, H = 20, HUD = 60;
+const DIRS = [[1,0],[-1,0],[0,1],[0,-1]];
+const rnd = (a,b) => a + Math.random()*(b-a);
+const ri = (a,b) => Math.floor(rnd(a,b+1));
+const pick = a => a[Math.floor(Math.random()*a.length)];
+const shuffle = a => { for (let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];} return a; };
+const dist = (a,b) => Math.hypot(a.x-b.x, a.y-b.y);
+const angDiff = (a,b) => { let d=b-a; while(d>Math.PI)d-=2*Math.PI; while(d<-Math.PI)d+=2*Math.PI; return d; };
+const fmt = n => '$' + Math.round(n).toLocaleString();
+
+const BANKS = ['First Local Savings','Harbor Credit Union','Midtown Trust','Goldline Investment Bank','The Federal Vault'];
+const UPG = [
+  {id:'shoes',   name:'Soft Sneakers',     desc:'+15% move speed',                cost:1500, apply:g=>g.speed*=1.15},
+  {id:'bag',     name:'Reinforced Duffel', desc:'Loot slows you 40% less',        cost:2000, apply:g=>g.bagMult*=0.6},
+  {id:'drill',   name:'Thermal Drill',     desc:'Crack vaults 40% faster',        cost:2000, apply:g=>g.crack*=0.6},
+  {id:'smoke',   name:'Smoke Bombs x2',    desc:'[Q] Cloud that blinds guards & cameras', cost:1000, apply:g=>g.smoke+=2},
+  {id:'emp',     name:'EMP Charge',        desc:'[F] Kill all cameras for 10s',   cost:1200, apply:g=>g.emp+=1},
+  {id:'kevlar',  name:'Kevlar Vest',       desc:'+1 life',                        cost:2500, apply:g=>g.lives+=1},
+  {id:'shadow',  name:'Shadow Training',   desc:'Get spotted 25% slower',         cost:2500, apply:g=>g.stealth*=0.75},
+  {id:'dispatch',name:'Bribed Dispatcher', desc:'+12s before police arrive',      cost:1500, apply:g=>g.policeBonus+=12},
+  {id:'quiet',   name:'Silent Steps',      desc:'Sprinting makes 50% less noise', cost:1200, apply:g=>g.quiet*=0.5},
+  {id:'intel',   name:'Inside Man',        desc:'+25% value on all loot',         cost:3000, apply:g=>g.lootMult*=1.25},
+];
+
+let G = null;     // run state
+let L = null;     // level state
+let grid = null;  // tile grid: 1 = wall
+let state = 'title';
+const keys = {};
+let best = 0;
+try { best = +localStorage.getItem('nsh_best') || 0; } catch(e) {}
+
+// ---------- map ----------
+const wall = (x,y) => { const tx=Math.floor(x), ty=Math.floor(y); return tx<0||ty<0||tx>=W||ty>=H||grid[ty][tx]===1; };
+const hitsWall = (x,y,r) => wall(x-r,y-r)||wall(x+r,y-r)||wall(x-r,y+r)||wall(x+r,y+r);
+const center = r => ({x:Math.floor(r.x+r.w/2), y:Math.floor(r.y+r.h/2)});
+
+function carveCorridor(a,b){
+  let x=a.x, y=a.y;
+  const horizFirst = Math.random()<0.5;
+  const stepX = () => { while(x!==b.x){ grid[y][x]=0; x+=Math.sign(b.x-x); } };
+  const stepY = () => { while(y!==b.y){ grid[y][x]=0; y+=Math.sign(b.y-y); } };
+  if (horizFirst){ stepX(); stepY(); } else { stepY(); stepX(); }
+  grid[y][x]=0;
+}
+
+function bfs(sx,sy,tx,ty){
+  if (sx===tx && sy===ty) return [{x:tx,y:ty}];
+  const prev = new Int32Array(W*H).fill(-1);
+  const s = sy*W+sx, t = ty*W+tx;
+  const q=[s]; prev[s]=s; let h=0;
+  while (h<q.length){
+    const c=q[h++]; if (c===t) break;
+    const cx=c%W, cy=(c/W)|0;
+    for (const [dx,dy] of DIRS){
+      const nx=cx+dx, ny=cy+dy;
+      if (nx<0||ny<0||nx>=W||ny>=H||grid[ny][nx]) continue;
+      const n=ny*W+nx; if (prev[n]!==-1) continue;
+      prev[n]=c; q.push(n);
+    }
+  }
+  if (prev[t]===-1) return null;
+  const path=[]; let c=t;
+  while (c!==s){ path.push({x:c%W, y:(c/W)|0}); c=prev[c]; }
+  return path.reverse();
+}
+
+function floodDist(sx,sy){
+  const d = new Int32Array(W*H).fill(-1); const q=[sy*W+sx]; d[sy*W+sx]=0; let h=0;
+  while (h<q.length){ const c=q[h++], cx=c%W, cy=(c/W)|0;
+    for (const [dx,dy] of DIRS){ const nx=cx+dx, ny=cy+dy;
+      if (nx<0||ny<0||nx>=W||ny>=H||grid[ny][nx]) continue;
+      const n=ny*W+nx; if (d[n]!==-1) continue; d[n]=d[c]+1; q.push(n); } }
+  return d;
+}
+
+function genLevel(){
+  const f = G.floor;
+  let rooms;
+  do {
+    grid = Array.from({length:H}, () => Array(W).fill(1));
+    rooms = [];
+    let tries = 0;
+    const want = 7 + Math.min(f,3);
+    while (rooms.length < want && tries < 400){
+      tries++;
+      const w=ri(4,8), h=ri(3,6), x=ri(1,W-w-1), y=ri(1,H-h-1);
+      if (rooms.some(o => x-1 < o.x+o.w && x+w+1 > o.x && y-1 < o.y+o.h && y+h+1 > o.y)) continue;
+      rooms.push({x,y,w,h});
+    }
+  } while (rooms.length < 6);
+  for (const r of rooms) for (let y=r.y;y<r.y+r.h;y++) for (let x=r.x;x<r.x+r.w;x++) grid[y][x]=0;
+  rooms.sort((a,b)=>a.x-b.x);
+  for (let i=1;i<rooms.length;i++) carveCorridor(center(rooms[i-1]), center(rooms[i]));
+  // a few loops (never through the start room)
+  for (let i=0;i<2;i++){ const a=ri(1,rooms.length-1), b=ri(1,rooms.length-1); if (a!==b) carveCorridor(center(rooms[a]), center(rooms[b])); }
+
+  const start = rooms[0];
+  const van = {x:start.x+0.5, y:start.y+0.5};
+  const player = {x:start.x+1.5, y:start.y+Math.min(1.5,start.h-0.5), weight:0, carry:0, face:0};
+
+  // vault = farthest room from start
+  const d = floodDist(start.x, start.y);
+  let vault = rooms[1], vd = -1;
+  for (const r of rooms.slice(1)){ const c=center(r), v=d[c.y*W+c.x]; if (v>vd){vd=v; vault=r;} }
+  const vc = center(vault);
+  const safe = {x:vc.x+0.5, y:vc.y+0.5, done:false, prog:0, val:Math.round(ri(3000,5000)*(1+f*0.7)*G.lootMult/10)*10};
+
+  // cash piles
+  const cash = [];
+  for (const r of rooms.slice(1)){
+    const n = r===vault ? ri(2,3) : ri(0,2);
+    for (let i=0;i<n;i++){
+      const x=ri(r.x,r.x+r.w-1)+0.5, y=ri(r.y,r.y+r.h-1)+0.5;
+      if (Math.abs(x-safe.x)<1 && Math.abs(y-safe.y)<1) continue;
+      cash.push({x,y,val:Math.round(ri(300,800)*(1+f*0.6)*G.lootMult/10)*10, taken:false, bob:Math.random()*6});
+    }
+  }
+
+  // guards
+  const others = rooms.slice(1);
+  const guards = [];
+  const gCount = Math.min(2+f, 6);
+  for (let i=0;i<gCount;i++){
+    const route = shuffle(others.slice()).slice(0, ri(2,3)).map(r => ({x:ri(r.x,r.x+r.w-1), y:ri(r.y,r.y+r.h-1)}));
+    const s = route[0];
+    guards.push({x:s.x+0.5, y:s.y+0.5, face:Math.random()*6, route, ri:0, path:[], state:'patrol',
+                 target:null, lookT:0, blind:0, repath:0, cd:0, sees:false});
+  }
+  // cameras in room corners
+  const cams = [];
+  const cCount = Math.min(1+f, 5);
+  for (const r of shuffle(others.slice()).slice(0,cCount)){
+    const cx = Math.random()<.5 ? r.x : r.x+r.w-1, cy = Math.random()<.5 ? r.y : r.y+r.h-1;
+    const c = center(r);
+    cams.push({x:cx+0.5, y:cy+0.5, base:Math.atan2(c.y-cy, c.x-cx), ang:0, ph:Math.random()*6, sees:false});
+  }
+
+  L = {rooms, start, van, player, safe, cash, guards, cams, smokes:[], rings:[], texts:[],
+       det:0, alarm:false, alarmEver:false, police:0, empT:0, time:0, lastKnown:null, noiseT:0, drillT:0, flash:0};
+}
+
+// ---------- vision ----------
+function inSmoke(x,y){ for (const s of L.smokes) if (Math.hypot(x-s.x,y-s.y) < s.r) return true; return false; }
+function los(ax,ay,bx,by){
+  const d=Math.hypot(bx-ax,by-ay), n=Math.ceil(d/0.1);
+  for (let i=1;i<n;i++){ const x=ax+(bx-ax)*i/n, y=ay+(by-ay)*i/n; if (wall(x,y) || inSmoke(x,y)) return false; }
+  return true;
+}
+function canSee(o, face, range, half, p){
+  const d = dist(o,p); if (d > range) return false;
+  if (d > 0.7 && Math.abs(angDiff(face, Math.atan2(p.y-o.y, p.x-o.x))) > half) return false;
+  return los(o.x,o.y,p.x,p.y);
+}
+function conePoly(o, face, range, half){
+  const pts=[[o.x,o.y]], N=22;
+  for (let k=0;k<=N;k++){
+    const a = face-half + 2*half*k/N, cx=Math.cos(a), cy=Math.sin(a);
+    let t=0; while (t<range){ t+=0.12; const x=o.x+cx*t, y=o.y+cy*t; if (wall(x,y)||inSmoke(x,y)) break; }
+    pts.push([o.x+cx*t, o.y+cy*t]);
+  }
+  return pts;
+}
+const G_RANGE = 5.5, G_HALF = 0.62, C_RANGE = 5, C_HALF = 0.42;
+
+// ---------- events ----------
+function say(x,y,txt,color='#e8e6df'){ L.texts.push({x,y,txt,color,t:1.4}); }
+function noise(x,y,r){
+  L.rings.push({x,y,r,t:0});
+  for (const g of L.guards){
+    if (g.blind>0 || dist(g,{x,y})>r) continue;
+    if (L.alarm){ g.state='chase'; L.lastKnown={x,y}; }
+    else if (g.state!=='chase'){ g.state='investigate'; g.target={x:Math.floor(x),y:Math.floor(y)}; g.path=bfs(Math.floor(g.x),Math.floor(g.y),g.target.x,g.target.y)||[]; }
+  }
+}
+function triggerAlarm(){
+  if (L.alarm) return;
+  L.alarm = L.alarmEver = true;
+  L.police = Math.max(18, 45 - G.floor*5 + G.policeBonus);
+  L.lastKnown = {x:L.player.x, y:L.player.y};
+  for (const g of L.guards){ g.state='chase'; g.repath=0; }
+  say(L.player.x, L.player.y-1, 'ALARM!', '#e5484d');
+}
+function caught(g){
+  G.lives--;
+  L.flash = 0.6;
+  if (G.lives <= 0){ endRun(false, 'A guard tackled you. Cuffs on.'); return; }
+  const p = L.player;
+  const lost = Math.round(p.carry/2);
+  p.carry -= lost; p.weight = Math.ceil(p.weight/2);
+  p.x = L.start.x+1.5; p.y = L.start.y+Math.min(1.5,L.start.h-0.5);
+  for (const o of L.guards) o.cd = 2.5;
+  triggerAlarm();
+  say(p.x, p.y-1, lost>0 ? `Broke free! Dropped ${fmt(lost)}` : 'Broke free!', '#e5484d');
+}
+
+// ---------- update ----------
+function moveAlong(g, speed, dt){
+  if (!g.path || !g.path.length) return true;
+  const n = g.path[0], tx=n.x+0.5, ty=n.y+0.5;
+  const dx=tx-g.x, dy=ty-g.y, d=Math.hypot(dx,dy);
+  const want = Math.atan2(dy,dx);
+  g.face += angDiff(g.face, want) * Math.min(1, dt*8);
+  if (d <= speed*dt){ g.x=tx; g.y=ty; g.path.shift(); return !g.path.length; }
+  g.x += dx/d*speed*dt; g.y += dy/d*speed*dt;
+  return false;
+}
+
+function update(dt){
+  L.time += dt;
+  const p = L.player, f = G.floor;
+  // --- player
+  let mx=0,my=0;
+  if (keys.KeyW||keys.ArrowUp) my--; if (keys.KeyS||keys.ArrowDown) my++;
+  if (keys.KeyA||keys.ArrowLeft) mx--; if (keys.KeyD||keys.ArrowRight) mx++;
+  const sprint = keys.ShiftLeft||keys.ShiftRight;
+  const moving = mx||my;
+  if (moving){
+    const m = Math.hypot(mx,my); mx/=m; my/=m; p.face=Math.atan2(my,mx);
+    const slow = Math.max(0.45, 1 - p.weight*0.045*G.bagMult);
+    const sp = 3.4 * G.speed * slow * (sprint?1.6:1);
+    const nx=p.x+mx*sp*dt; if (!hitsWall(nx,p.y,0.3)) p.x=nx;
+    const ny=p.y+my*sp*dt; if (!hitsWall(p.x,ny,0.3)) p.y=ny;
+    if (sprint){ L.noiseT += dt; if (L.noiseT>0.4){ L.noiseT=0; noise(p.x,p.y,3.4*G.quiet); } }
+  }
+  // cash pickup
+  for (const c of L.cash) if (!c.taken && dist(c,p)<0.6){ c.taken=true; p.carry+=c.val; p.weight+=1; say(c.x,c.y,'+'+fmt(c.val),'#46c37b'); }
+  // safe cracking
+  const s = L.safe;
+  if (!s.done && dist(s,p)<1.2 && (keys.KeyE||keys.Space)){
+    s.prog += dt/(4.5*G.crack);
+    L.drillT += dt; if (L.drillT>1.1){ L.drillT=0; noise(s.x,s.y,3.6); }
+    if (s.prog>=1){ s.done=true; p.carry+=s.val; p.weight+=4; say(s.x,s.y-0.6,'VAULT +'+fmt(s.val),'#f2c14e'); }
+  }
+  // --- timers
+  if (L.empT>0) L.empT-=dt;
+  for (const sm of L.smokes) sm.t-=dt;
+  L.smokes = L.smokes.filter(sm=>sm.t>0);
+  for (const r of L.rings) r.t+=dt; L.rings = L.rings.filter(r=>r.t<0.6);
+  for (const t of L.texts){ t.t-=dt; t.y-=dt*0.8; } L.texts = L.texts.filter(t=>t.t>0);
+  if (L.flash>0) L.flash-=dt;
+
+  let detRate = 0;
+  // --- cameras
+  for (const c of L.cams){
+    c.ang = c.base + Math.sin(L.time*0.7 + c.ph)*0.85;
+    c.sees = L.empT<=0 && canSee(c, c.ang, C_RANGE, C_HALF, p);
+    if (c.sees){
+      if (L.alarm){ L.lastKnown={x:p.x,y:p.y}; }
+      else detRate += 0.9;
+    }
+  }
+  // --- guards
+  const gSpeed = {patrol:1.5+f*0.1, investigate:2.2+f*0.1, chase:3.1+f*0.15};
+  for (const g of L.guards){
+    if (g.cd>0) g.cd-=dt;
+    if (g.blind>0){ g.blind-=dt; g.sees=false; g.face+=dt*3; continue; }
+    if (L.smokes.some(sm=>Math.hypot(g.x-sm.x,g.y-sm.y)<sm.r)){ g.blind=Math.max(g.blind,1.5); continue; }
+    g.sees = canSee(g, g.face, G_RANGE, G_HALF, p);
+    if (g.sees){
+      if (L.alarm){ g.state='chase'; L.lastKnown={x:p.x,y:p.y}; }
+      else {
+        const close = 1 - dist(g,p)/G_RANGE;
+        detRate += 1.0 + close*2.2;
+        g.face += angDiff(g.face, Math.atan2(p.y-g.y,p.x-g.x))*Math.min(1,dt*4);
+      }
+    }
+    if (g.cd<=0 && dist(g,p)<0.62){ caught(g); if (state!=='play') return; continue; }
+
+    const gt = {x:Math.floor(g.x), y:Math.floor(g.y)};
+    if (g.state==='patrol'){
+      if (!L.alarm && L.det>0.25 && g.sees) continue; // stops and stares
+      if (moveAlong(g, gSpeed.patrol, dt)){
+        g.ri = (g.ri+1)%g.route.length; const w=g.route[g.ri];
+        g.path = bfs(gt.x,gt.y,w.x,w.y)||[];
+      }
+    } else if (g.state==='investigate'){
+      if (moveAlong(g, gSpeed.investigate, dt)){ g.state='look'; g.lookT=2.2; }
+    } else if (g.state==='look'){
+      g.face += dt*2.4; g.lookT-=dt;
+      if (g.lookT<=0){
+        if (L.alarm){ // sweep a random room
+          const r=pick(L.rooms.slice(1)); const c=center(r);
+          g.state='investigate'; g.path=bfs(gt.x,gt.y,c.x,c.y)||[];
+        } else { g.state='patrol'; const w=g.route[g.ri]; g.path=bfs(gt.x,gt.y,w.x,w.y)||[]; }
+      }
+    } else if (g.state==='chase'){
+      g.repath -= dt;
+      if (g.repath<=0){
+        g.repath=0.35;
+        const tgt = g.sees ? p : L.lastKnown;
+        if (tgt) g.path = bfs(gt.x,gt.y,Math.floor(tgt.x),Math.floor(tgt.y))||[];
+      }
+      if (g.sees && g.path.length<=1){ // close: run straight at the player
+        const dx=p.x-g.x, dy=p.y-g.y, d=Math.hypot(dx,dy)||1, sp=gSpeed.chase*dt;
+        if (!hitsWall(g.x+dx/d*sp,g.y,0.25)) g.x+=dx/d*sp;
+        if (!hitsWall(g.x,g.y+dy/d*sp,0.25)) g.y+=dy/d*sp;
+        g.face=Math.atan2(dy,dx);
+      } else if (moveAlong(g, gSpeed.chase, dt) && !g.sees){ g.state='look'; g.lookT=1.5; }
+    }
+  }
+  // --- detection / alarm
+  if (!L.alarm){
+    if (detRate>0) L.det += detRate*dt*G.stealth*(sprint&&moving?1.4:1);
+    else L.det = Math.max(0, L.det - 0.3*dt);
+    if (L.det>=1) triggerAlarm();
+  } else {
+    L.police -= dt;
+    if (L.police<=0){ endRun(false, 'SWAT stormed the building.'); return; }
+  }
+}
+
+// ---------- input ----------
+addEventListener('keydown', e => {
+  keys[e.code]=true;
+  if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+  if (state!=='play' || e.repeat) return;
+  const p = L.player;
+  if ((e.code==='KeyE'||e.code==='Space') && dist(p,L.van)<1.3) escapeFloor();
+  if (e.code==='KeyQ' && G.smoke>0){ G.smoke--; L.smokes.push({x:p.x,y:p.y,r:2.4,t:6}); say(p.x,p.y-1,'SMOKE','#aab'); }
+  if (e.code==='KeyF' && G.emp>0){ G.emp--; L.empT=10; say(p.x,p.y-1,'EMP','#6cf'); }
+  if (e.code==='Escape') togglePause();
+});
+addEventListener('keyup', e => { keys[e.code]=false; });
+addEventListener('blur', () => { for (const k in keys) keys[k]=false; if (state==='play') togglePause(); });
+
+// ---------- flow ----------
+function setOverlay(html){ panel.innerHTML=html; ov.classList.remove('hide'); }
+function hideOverlay(){ ov.classList.add('hide'); }
+
+function showTitle(){
+  state='title';
+  setOverlay(`
+    <h1>NIGHT SHIFT HEIST</h1>
+    <p>Five banks. One crew of one. Every run is a new layout.</p>
+    <div class="keys">
+      <b>WASD / Arrows</b><span>Move</span>
+      <b>Shift</b><span>Sprint (noisy)</span>
+      <b>E / Space</b><span>Hold to crack the vault · tap at the van to escape</span>
+      <b>Q</b><span>Smoke bomb</span>
+      <b>F</b><span>EMP (cameras)</span>
+      <b>Esc</b><span>Pause</span>
+    </div>
+    <p>Grab cash, crack the vault, get back to the van. Heavy bags slow you down.<br>
+    Stay out of vision cones. If the alarm trips, the police clock starts.<br>
+    Escape with no alarm for a <span class="money">+25% ghost bonus</span>. Spend your take between jobs.</p>
+    ${best?`<p>Best haul: <span class="money">${fmt(best)}</span></p>`:''}
+    <button class="go" data-act="start">Start a run</button>`);
+}
+
+function showPerk(){
+  state='perk';
+  const opts = shuffle(UPG.slice()).slice(0,3);
+  setOverlay(`<h2>Pick your specialty</h2><p>One free perk to start the run.</p>
+    <div class="cards">${opts.map(u=>`<button class="card" data-act="perk" data-id="${u.id}"><div class="n">${u.name}</div><div class="d">${u.desc}</div></button>`).join('')}</div>`);
+}
+
+function startFloor(){
+  genLevel();
+  state='play'; hideOverlay();
+  say(L.player.x, L.player.y-1.2, BANKS[G.floor], '#f2c14e');
+}
+
+function escapeFloor(){
+  const p=L.player;
+  const ghost = !L.alarmEver ? Math.round(p.carry*0.25) : 0;
+  const total = p.carry + ghost;
+  G.bank += total; G.earned += total; G.floor++;
+  G.lastSummary = {haul:p.carry, ghost, bank:BANKS[G.floor-1]};
+  if (G.floor>=BANKS.length){ endRun(true); return; }
+  showShop();
+}
+
+function showShop(){
+  state='shop';
+  const s = G.lastSummary;
+  const opts = shuffle(UPG.slice()).slice(0,4);
+  G.shop = opts.map(u=>({...u, cost:Math.round(u.cost*(1+G.floor*0.25)/100)*100, sold:false}));
+  renderShop(s);
+}
+function renderShop(s){
+  setOverlay(`<h2>Safehouse</h2>
+    <p>${s.bank}: <span class="money">${fmt(s.haul)}</span>${s.ghost?` + ghost bonus <span class="money">${fmt(s.ghost)}</span>`:''}</p>
+    <p class="stat">Stash: <span class="money">${fmt(G.bank)}</span> · Lives: ${G.lives} · Smoke: ${G.smoke} · EMP: ${G.emp}</p>
+    <div class="cards">${G.shop.map((u,i)=>`<button class="card" data-act="buy" data-i="${i}" ${u.sold||u.cost>G.bank?'disabled':''}>
+      <div class="n">${u.name}</div><div class="d">${u.desc}</div><div class="c ${u.cost>G.bank&&!u.sold?'bad':'money'}">${u.sold?'Bought':fmt(u.cost)}</div></button>`).join('')}</div>
+    <p>Next: <span class="stat">${BANKS[G.floor]}</span> (job ${G.floor+1}/${BANKS.length})</p>
+    <button class="go" data-act="next">Next job</button>`);
+}
+
+function endRun(win, why=''){
+  state='over';
+  const score = G.earned;
+  const newBest = score>best; if (newBest){ best=score; try{localStorage.setItem('nsh_best',best);}catch(e){} }
+  setOverlay(`<h1 style="color:${win?'var(--ok)':'var(--danger)'}">${win?'CLEAN GETAWAY':'BUSTED'}</h1>
+    <p>${win?'You hit all five banks and vanished.':why}</p>
+    <p class="stat">Jobs completed: ${G.floor}/${BANKS.length}</p>
+    <p class="stat">Total take: <span class="money">${fmt(score)}</span>${newBest?' · <span style="color:var(--accent)">new best!</span>':''}</p>
+    <button class="go" data-act="start">New run</button>`);
+}
+
+let paused=false;
+function togglePause(){
+  if (state==='play'){ state='paused'; setOverlay(`<h2>Paused</h2><button class="go" data-act="resume">Resume</button>`); }
+  else if (state==='paused'){ state='play'; hideOverlay(); }
+}
+
+panel.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b || b.disabled) return;
+  const act = b.dataset.act;
+  if (act==='start'){
+    G = {floor:0,bank:0,earned:0,lives:2,speed:1,bagMult:1,crack:1,smoke:1,emp:0,stealth:1,policeBonus:0,quiet:1,lootMult:1};
+    showPerk();
+  } else if (act==='perk'){ UPG.find(u=>u.id===b.dataset.id).apply(G); startFloor(); }
+  else if (act==='buy'){ const u=G.shop[+b.dataset.i]; if (!u.sold && G.bank>=u.cost){ G.bank-=u.cost; u.sold=true; u.apply(G); renderShop(G.lastSummary); } }
+  else if (act==='next'){ startFloor(); }
+  else if (act==='resume'){ togglePause(); }
+});
+
+// ---------- render ----------
+function draw(){
+  ctx.fillStyle='#0b0d14'; ctx.fillRect(0,0,cv.width,cv.height);
+  if (!L) return;
+  ctx.save(); ctx.translate(0,HUD);
+  // tiles
+  for (let y=0;y<H;y++) for (let x=0;x<W;x++){
+    if (grid[y][x]){
+      const edge = y+1<H && !grid[y+1][x];
+      ctx.fillStyle='#0d1018'; ctx.fillRect(x*T,y*T,T,T);
+      if (edge){ ctx.fillStyle='#39425a'; ctx.fillRect(x*T,y*T+T-8,T,8); }
+    } else {
+      ctx.fillStyle=(x+y)%2?'#232a3b':'#262e40'; ctx.fillRect(x*T,y*T,T,T);
+    }
+  }
+  const P = v => v*T;
+  // van
+  const v=L.van, nearVan = dist(L.player,v)<1.3;
+  ctx.fillStyle='#2f6b4a'; ctx.fillRect(P(v.x)-14,P(v.y)-12,28,24);
+  ctx.fillStyle='#bfe8cf'; ctx.font='bold 9px monospace'; ctx.textAlign='center'; ctx.fillText('VAN',P(v.x),P(v.y)+3);
+  // cash
+  for (const c of L.cash) if (!c.taken){
+    const by = Math.sin(L.time*3+c.bob)*1.5;
+    ctx.fillStyle='#2e8b57'; ctx.fillRect(P(c.x)-9,P(c.y)-6+by,18,12);
+    ctx.fillStyle='#c8f5d5'; ctx.font='bold 10px monospace'; ctx.fillText('$',P(c.x),P(c.y)+4+by);
+  }
+  // safe
+  const s=L.safe;
+  ctx.fillStyle=s.done?'#4a4430':'#b8922f'; ctx.fillRect(P(s.x)-13,P(s.y)-13,26,26);
+  ctx.strokeStyle='#1a1405'; ctx.lineWidth=2; ctx.strokeRect(P(s.x)-13,P(s.y)-13,26,26);
+  ctx.beginPath(); ctx.arc(P(s.x),P(s.y),6,0,7); ctx.stroke();
+  if (!s.done && s.prog>0){ ctx.strokeStyle='#f2c14e'; ctx.lineWidth=4; ctx.beginPath(); ctx.arc(P(s.x),P(s.y),20,-Math.PI/2,-Math.PI/2+s.prog*Math.PI*2); ctx.stroke(); }
+  // cones
+  const coneCol = L.alarm ? 'rgba(229,72,77,0.18)' : `rgba(255,${Math.round(220-L.det*150)},90,${0.12+L.det*0.12})`;
+  const fillCone = pts => { ctx.beginPath(); ctx.moveTo(P(pts[0][0]),P(pts[0][1])); for (const q of pts) ctx.lineTo(P(q[0]),P(q[1])); ctx.closePath(); ctx.fill(); };
+  for (const g of L.guards) if (g.blind<=0){ ctx.fillStyle=coneCol; fillCone(conePoly(g,g.face,G_RANGE,G_HALF)); }
+  for (const c of L.cams) if (L.empT<=0){ ctx.fillStyle=coneCol; fillCone(conePoly(c,c.ang,C_RANGE,C_HALF)); }
+  // cameras
+  for (const c of L.cams){
+    ctx.save(); ctx.translate(P(c.x),P(c.y)); ctx.rotate(c.ang);
+    ctx.fillStyle=L.empT>0?'#444':'#9aa3b8'; ctx.fillRect(-7,-5,14,10);
+    ctx.fillStyle=L.empT>0?'#222':(c.sees?'#e5484d':'#3c3'); ctx.fillRect(5,-3,4,6);
+    ctx.restore();
+  }
+  // smoke
+  for (const sm of L.smokes){
+    const a = Math.min(1, sm.t/1.5)*0.75;
+    for (let i=0;i<6;i++){ const ang=i+L.time*0.3, rr=sm.r*0.45;
+      ctx.fillStyle=`rgba(150,155,170,${a*0.35})`; ctx.beginPath(); ctx.arc(P(sm.x+Math.cos(ang)*rr),P(sm.y+Math.sin(ang)*rr),P(sm.r*0.6),0,7); ctx.fill(); }
+  }
+  // guards
+  for (const g of L.guards){
+    ctx.fillStyle = g.state==='chase'?'#d14b4b':'#4c7fd9';
+    ctx.beginPath(); ctx.arc(P(g.x),P(g.y),10,0,7); ctx.fill();
+    ctx.fillStyle='#0b0d14'; ctx.beginPath(); ctx.arc(P(g.x)+Math.cos(g.face)*6,P(g.y)+Math.sin(g.face)*6,3,0,7); ctx.fill();
+    ctx.font='bold 14px monospace';
+    if (g.blind>0){ ctx.fillStyle='#ccc'; ctx.fillText('?',P(g.x),P(g.y)-14); }
+    else if (g.sees || g.state==='chase'){ ctx.fillStyle='#e5484d'; ctx.fillText('!',P(g.x),P(g.y)-14); }
+    else if (g.state==='investigate'||g.state==='look'){ ctx.fillStyle='#f2c14e'; ctx.fillText('?',P(g.x),P(g.y)-14); }
+  }
+  // player
+  const p=L.player;
+  if (p.weight>0){ const bs=6+Math.min(p.weight,12); ctx.fillStyle='#6b5a3a';
+    ctx.beginPath(); ctx.arc(P(p.x)-Math.cos(p.face)*8,P(p.y)-Math.sin(p.face)*8,bs*0.6,0,7); ctx.fill(); }
+  ctx.fillStyle='#46c37b'; ctx.beginPath(); ctx.arc(P(p.x),P(p.y),9,0,7); ctx.fill();
+  ctx.fillStyle='#0b0d14'; ctx.fillRect(P(p.x)-6,P(p.y)-3,12,4); // mask
+  // noise rings
+  for (const r of L.rings){ ctx.strokeStyle=`rgba(242,193,78,${0.5-r.t*0.8})`; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(P(r.x),P(r.y),P(r.r)*(r.t/0.6),0,7); ctx.stroke(); }
+  // prompts
+  ctx.font='bold 12px monospace'; ctx.textAlign='center';
+  if (nearVan){ ctx.fillStyle='#bfe8cf'; ctx.fillText(`[E] ESCAPE with ${fmt(p.carry)}`,P(v.x)+40,P(v.y)-18); }
+  if (!s.done && dist(s,p)<1.2){ ctx.fillStyle='#f2c14e'; ctx.fillText('HOLD [E] to crack', P(s.x), P(s.y)-26); }
+  // floating text
+  for (const t of L.texts){ ctx.globalAlpha=Math.min(1,t.t); ctx.fillStyle=t.color; ctx.font='bold 13px monospace'; ctx.fillText(t.txt,P(t.x),P(t.y)); }
+  ctx.globalAlpha=1;
+  ctx.restore();
+
+  // alarm vignette
+  if (L.alarm){ const a=0.12+0.1*Math.sin(L.time*8); ctx.strokeStyle=`rgba(229,72,77,${a})`; ctx.lineWidth=18; ctx.strokeRect(9,HUD+9,cv.width-18,cv.height-HUD-18); }
+  if (L.flash>0){ ctx.fillStyle=`rgba(229,72,77,${L.flash*0.5})`; ctx.fillRect(0,HUD,cv.width,cv.height-HUD); }
+
+  // HUD
+  ctx.fillStyle='#10141f'; ctx.fillRect(0,0,cv.width,HUD);
+  ctx.fillStyle='#2a3247'; ctx.fillRect(0,HUD-2,cv.width,2);
+  ctx.textAlign='left'; ctx.font='bold 15px monospace'; ctx.fillStyle='#f2c14e';
+  ctx.fillText(`JOB ${G.floor+1}/${BANKS.length}`,16,24);
+  ctx.font='13px monospace'; ctx.fillStyle='#8d93a5'; ctx.fillText(BANKS[G.floor],16,44);
+  // center: detection / alarm
+  const cx=cv.width/2;
+  ctx.textAlign='center';
+  if (L.alarm){
+    ctx.fillStyle='#e5484d'; ctx.font='bold 20px monospace';
+    ctx.fillText(`POLICE IN ${Math.max(0,L.police).toFixed(1)}s`,cx,36);
+  } else {
+    ctx.fillStyle='#8d93a5'; ctx.font='11px monospace'; ctx.fillText('DETECTION',cx,16);
+    ctx.fillStyle='#232a3b'; ctx.fillRect(cx-110,24,220,14);
+    ctx.fillStyle=L.det>0.66?'#e5484d':L.det>0.33?'#f2a14e':'#f2c14e'; ctx.fillRect(cx-110,24,220*Math.min(1,L.det),14);
+    if (L.empT>0){ ctx.fillStyle='#6cf'; ctx.fillText(`EMP ${L.empT.toFixed(1)}s`,cx,52); }
+  }
+  ctx.textAlign='right'; ctx.font='bold 14px monospace';
+  ctx.fillStyle='#46c37b'; ctx.fillText(`BAG ${fmt(p.carry)}  STASH ${fmt(G.bank)}`,cv.width-16,24);
+  ctx.fillStyle='#e8e6df'; ctx.font='13px monospace';
+  ctx.fillText(`♥ ${G.lives}   [Q] Smoke ${G.smoke}   [F] EMP ${G.emp}`,cv.width-16,44);
+}
+
+// ---------- loop ----------
+let last=performance.now();
+function frame(now){
+  const dt=Math.min(0.05,(now-last)/1000); last=now;
+  if (state==='play') update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+showTitle();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
