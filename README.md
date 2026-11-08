@@ -5,10 +5,12 @@ A small roguelite stealth bank-robbery game that runs in the browser. It's one H
 **Play:** open `index.html` in a browser. It works on desktop (keyboard) and on phones and tablets (touch controls, portrait or landscape).
 
 ## How to play
-**Touch:** the left stick moves you, and pushing it all the way to the edge sprints. Hold ACT to crack the vault or pick a lock, and tap it at the van to escape. SMOKE, DECOY, DISG and EMP use your items, and II pauses.
+**Touch:** the left stick moves you. A light push sneaks, and pushing it to the edge sprints. The SNEAK button toggles sneaking on. Hold ACT to crack the vault or pick a lock, and tap it at the van to escape. SMOKE, DECOY, DISG and EMP use your items, and II pauses.
 
 **Keyboard:**
-- **WASD / arrows**: move. **Shift**: sprint, which makes noise guards can hear.
+- **WASD / arrows**: move. Normal footsteps make a little noise.
+- **X**: toggle sneak. It's silent and slower, you're spotted more slowly, and dogs have to get closer to smell you.
+- **Shift**: sprint. It's loud.
 - **E / Space**: hold next to the vault to crack it (drilling is loud) or next to a locked door to pick it. Tap at the van to escape.
 - **Q**: smoke bomb. **R**: throw a decoy. **C**: guard uniform (disguise). **F**: EMP that disables cameras and lasers.
 - **Esc**: pause. **M**: sound on/off.

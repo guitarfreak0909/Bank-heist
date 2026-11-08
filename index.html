@@ -35,6 +35,7 @@ body.menu #touch{display:none}
 #bDecoy{right:calc(122px + env(safe-area-inset-right));bottom:calc(112px + env(safe-area-inset-bottom))}
 #bDisg{right:calc(74px + env(safe-area-inset-right));bottom:calc(146px + env(safe-area-inset-bottom))}
 #bEmp{right:calc(12px + env(safe-area-inset-right));bottom:calc(148px + env(safe-area-inset-bottom))}
+#bSneak{left:calc(24px + env(safe-area-inset-left));bottom:calc(174px + env(safe-area-inset-bottom));width:54px;height:54px}
 #bPause{right:calc(10px + env(safe-area-inset-right));top:calc(72px + env(safe-area-inset-top));width:42px;height:42px;font-size:14px}
 h1{font-size:clamp(28px,5vw,52px);margin:0 0 4px;color:var(--accent);letter-spacing:2px}
 h2{font-size:clamp(20px,3vw,30px);margin:0 0 8px}
@@ -68,6 +69,7 @@ button.ghost{background:transparent;color:var(--muted);border:1px solid var(--li
   <button class="tb" id="bDecoy">DECOY<br>0</button>
   <button class="tb" id="bDisg">DISG<br>0</button>
   <button class="tb" id="bEmp">EMP<br>0</button>
+  <button class="tb" id="bSneak">SNEAK</button>
   <button class="tb" id="bPause">II</button>
 </div>
 <div id="ov"><div class="panel" id="panel"></div></div>
@@ -96,7 +98,7 @@ function layout(){
   V.narrow = V.w < 700;
   V.hud = V.narrow ? 62 : 60;
   const portraitTouch = TOUCH && V.h > V.w;
-  const ctrl = portraitTouch ? 220 : 0;           // controls sit under the map in portrait
+  const ctrl = portraitTouch ? 240 : 0;           // controls sit under the map in portrait
   V.vx = 0; V.vy = V.hud; V.vw = V.w; V.vh = Math.max(120, V.h - V.hud - ctrl);
   const fit = Math.min(V.vw/(W*T), V.vh/(H*T));
   V.scale = TOUCH ? Math.max(fit, 0.85) : Math.min(fit, 1.6);
@@ -165,7 +167,7 @@ const UPG = [
   {id:'kevlar',  name:'Kevlar Vest',       desc:'+1 life',                        cost:2500, apply:g=>g.lives+=1},
   {id:'shadow',  name:'Shadow Training',   desc:'Get spotted 25% slower',         cost:2500, apply:g=>g.stealth*=0.75},
   {id:'dispatch',name:'Bribed Dispatcher', desc:'+12s before police arrive',      cost:1500, apply:g=>g.policeBonus+=12},
-  {id:'quiet',   name:'Silent Steps',      desc:'Sprinting makes 50% less noise', cost:1200, apply:g=>g.quiet*=0.5},
+  {id:'quiet',   name:'Silent Steps',      desc:'Footsteps and sprinting are 50% quieter', cost:1200, apply:g=>g.quiet*=0.5},
   {id:'intel',   name:'Inside Man',        desc:'+25% value on all loot',         cost:3000, apply:g=>g.lootMult*=1.25},
 ];
 const CREW = [
@@ -180,6 +182,7 @@ let G = null;     // run state
 let L = null;     // level state
 let grid = null;  // tile grid: 1 = wall
 let state = 'title';
+let sneakOn = false;   // toggled sneak mode (X key / SNEAK button)
 const keys = {};
 let best = +store.get('nsh_best', 0) || 0;
 
@@ -352,14 +355,14 @@ function conePoly(o, face, range, half){
   }
   return pts;
 }
-const G_RANGE = 5.5, G_HALF = 0.62, C_RANGE = 5, C_HALF = 0.42, DOG_NOSE = 2.8;
+const G_RANGE = 5.5, G_HALF = 0.62, C_RANGE = 5, C_HALF = 0.42, DOG_NOSE = 2.8, DOG_NOSE_SNEAK = 1.7;
 const laserPhase = l => (L.time + l.ph) % (l.on + l.off);
 const laserOn = l => L.empT<=0 && laserPhase(l) < l.on;
 
 // ---------- events ----------
 function say(x,y,txt,color='#e8e6df'){ L.texts.push({x,y,txt,color,t:1.4}); }
-function noise(x,y,r){
-  L.rings.push({x,y,r,t:0});
+function noise(x,y,r,soft=false){
+  L.rings.push({x,y,r,t:0,soft});
   for (const g of L.guards){
     if (g.blind>0 || dist(g,{x,y})>r) continue;
     if (L.alarm){ g.state='chase'; L.lastKnown={x,y}; }
@@ -415,15 +418,19 @@ function update(dt){
   let analog = 1, stickSprint = false;
   if (stick.active && stick.mag > 0.15){ mx = stick.x; my = stick.y; analog = Math.min(1, stick.mag/0.7); stickSprint = stick.mag > 0.93; }
   const sprint = keys.ShiftLeft||keys.ShiftRight||stickSprint;
+  const gentle = stick.active && stick.mag>0.15 && stick.mag<0.5;   // a light push on the stick sneaks too
+  const sneaking = !sprint && (sneakOn || gentle);
+  L.sneaking = sneaking;
   const moving = mx||my;
   if (p.slowT>0) p.slowT -= dt;
   if (moving){
     const m = Math.hypot(mx,my); mx/=m; my/=m; p.face=Math.atan2(my,mx);
     const slow = Math.max(0.45, 1 - p.weight*0.045*G.bagMult) * (p.slowT>0 ? 0.5 : 1);
-    const sp = 3.4 * G.speed * slow * (sprint?1.6:analog);
+    const sp = 3.4 * G.speed * slow * (sprint ? 1.6 : sneaking ? 0.55 : analog);
     const nx=p.x+mx*sp*dt; if (!hitsSolid(nx,p.y,0.3)) p.x=nx;
     const ny=p.y+my*sp*dt; if (!hitsSolid(p.x,ny,0.3)) p.y=ny;
     if (sprint){ L.noiseT += dt; if (L.noiseT>0.4){ L.noiseT=0; noise(p.x,p.y,3.4*G.quiet); } }
+    else if (!sneaking){ L.noiseT += dt; if (L.noiseT>0.55){ L.noiseT=0; noise(p.x,p.y,1.9*G.quiet,true); } }   // footsteps
   }
   // --- cash pickup
   for (const c of L.cash) if (!c.taken && dist(c,p)<0.6){ c.taken=true; p.carry+=c.val; p.weight+=1; say(c.x,c.y,'+'+fmt(c.val),'#46c37b'); SFX.cash(); }
@@ -533,7 +540,7 @@ function update(dt){
     if (d.blind>0){ d.blind-=dt; d.face+=dt*5; continue; }
     if (L.smokes.some(sm=>Math.hypot(d.x-sm.x,d.y-sm.y)<sm.r)){ d.blind=1.5; d.state='wander'; d.path=[]; continue; }
     const dp = dist(d,p);
-    const smells = dp < DOG_NOSE && los(d.x,d.y,p.x,p.y);
+    const smells = dp < (sneaking?DOG_NOSE_SNEAK:DOG_NOSE) && los(d.x,d.y,p.x,p.y);
     const dt0 = {x:Math.floor(d.x), y:Math.floor(d.y)};
     if (smells){
       d.state='track'; d.lost=0;
@@ -563,7 +570,7 @@ function update(dt){
   if (!L.alarm){
     if (detRate>0){
       if (L.det<0.05 && L.huhT<=0){ SFX.huh(); L.huhT=1.5; }
-      L.det += detRate*dt*G.stealth*(sprint&&moving?1.4:1);
+      L.det += detRate*dt*G.stealth*(sprint&&moving?1.4:sneaking?0.65:1);
     }
     else L.det = Math.max(0, L.det - 0.3*dt);
     if (L.det>=1) triggerAlarm();
@@ -585,6 +592,7 @@ function doDecoy(){
   let t=0.5; while (t<4.5 && !solid(p.x+cx*(t+0.3), p.y+cy*(t+0.3))) t+=0.1;
   G.decoy--; L.decoys.push({x:p.x+cx*t, y:p.y+cy*t, t:0, beeps:0}); SFX.throw();
 }
+function toggleSneak(){ sneakOn=!sneakOn; SFX.click(); if (L) say(L.player.x,L.player.y-1,sneakOn?'SNEAKING':'WALKING','#9aa3b8'); uiCache=''; }
 function toggleMute(){ muted=!muted; store.set('nsh_mute', muted?'1':'0'); if (!muted){ audioOn(); SFX.click(); } }
 
 // ---------- input ----------
@@ -598,6 +606,7 @@ addEventListener('keydown', e => {
   if (e.code==='KeyF') doEmp();
   if (e.code==='KeyR') doDecoy();
   if (e.code==='KeyC') doDisguise();
+  if (e.code==='KeyX') toggleSneak();
   if (e.code==='Escape') togglePause();
 });
 addEventListener('keyup', e => { keys[e.code]=false; });
@@ -632,7 +641,7 @@ bAct.addEventListener('pointerdown', e => { e.preventDefault(); bAct.setPointerC
 const actUp = () => { touchAct=false; bAct.classList.remove('on'); };
 bAct.addEventListener('pointerup', actUp); bAct.addEventListener('pointercancel', actUp);
 const tap = (el, fn) => el.addEventListener('pointerdown', e => { e.preventDefault(); fn(); });
-tap(bSmoke, doSmoke); tap(bEmp, doEmp); tap(bDecoy, doDecoy); tap(bDisg, doDisguise); tap($('bPause'), () => togglePause());
+tap($('bSneak'), toggleSneak); tap(bSmoke, doSmoke); tap(bEmp, doEmp); tap(bDecoy, doDecoy); tap(bDisg, doDisguise); tap($('bPause'), () => togglePause());
 addEventListener('touchstart', () => { if (!TOUCH){ TOUCH=true; layout(); if (state==='title') showTitle(); } }, {passive:true});
 addEventListener('contextmenu', e => e.preventDefault());
 let uiCache='';
@@ -640,9 +649,10 @@ function syncTouchUI(){
   if (!TOUCH || state!=='play') return;
   const p=L.player;
   const lbl = dist(p,L.van)<1.3 ? 'ESCAPE' : L.actTarget==='safe' ? 'HOLD<br>CRACK' : L.actTarget ? 'HOLD<br>PICK' : 'ACT';
-  const key = [lbl,G.smoke,G.emp,G.decoy,G.disguise,L.disgT>0].join('|');
+  const key = [lbl,G.smoke,G.emp,G.decoy,G.disguise,L.disgT>0,sneakOn].join('|');
   if (key===uiCache) return; uiCache=key;
   bAct.innerHTML = lbl; bAct.classList.toggle('hot', lbl!=='ACT');
+  $('bSneak').classList.toggle('on', sneakOn);
   const set=(el,name,n,dis)=>{ el.innerHTML=`${name}<br>${n}`; el.disabled = dis; };
   set(bSmoke,'SMOKE',G.smoke,G.smoke<=0); set(bEmp,'EMP',G.emp,G.emp<=0);
   set(bDecoy,'DECOY',G.decoy,G.decoy<=0); set(bDisg,'DISG',G.disguise,G.disguise<=0||L.disgT>0);
@@ -659,7 +669,8 @@ function showTitle(){
     <h1>NIGHT SHIFT HEIST</h1>
     <p>Five banks. One crew of one. Every run is a new layout.</p>
     ${TOUCH ? `<div class="keys">
-      <b>Left stick</b><span>Move · push to the edge to sprint (noisy)</span>
+      <b>Left stick</b><span>Move · light push sneaks · push to the edge to sprint (loud)</span>
+      <b>SNEAK</b><span>Toggle sneaking: silent, slower, harder to spot</span>
       <b>ACT</b><span>Hold to crack the vault or pick a lock · tap at the van to escape</span>
       <b>SMOKE</b><span>Blind guards, dogs and cameras</span>
       <b>DECOY</b><span>Throw a beeper ahead of you</span>
@@ -667,7 +678,8 @@ function showTitle(){
       <b>EMP</b><span>Kill cameras and lasers</span>
     </div>` : `<div class="keys">
       <b>WASD / Arrows</b><span>Move</span>
-      <b>Shift</b><span>Sprint (noisy)</span>
+      <b>Shift</b><span>Sprint (loud)</span>
+      <b>X</b><span>Toggle sneak: silent, slower, harder to spot</span>
       <b>E / Space</b><span>Hold to crack the vault or pick a lock · tap at the van to escape</span>
       <b>Q</b><span>Smoke bomb: blinds guards, dogs and cameras</span>
       <b>R</b><span>Decoy: throw a beeper ahead of you</span>
@@ -676,6 +688,7 @@ function showTitle(){
       <b>Esc / M</b><span>Pause · sound on/off</span>
     </div>`}
     <p>Grab cash, crack the vault, get back to the van. Heavy bags slow you down.<br>
+    Footsteps carry. Sneak past guards and dogs; sprint only when you have to.<br>
     Watch for vision cones, locked doors, pulsing lasers and guard dogs.<br>
     Escape with no alarm for a <span class="money">+25% ghost bonus</span>. The last bank has a two-stage vault.</p>
     ${best?`<p>Best haul: <span class="money">${fmt(best)}</span></p>`:''}
@@ -835,7 +848,7 @@ function draw(){
   for (const g of L.guards) if (g.blind<=0) fillCone(conePoly(g,g.face,G_RANGE,G_HALF));
   for (const c of L.cams) if (L.empT<=0) fillCone(conePoly(c,c.ang,C_RANGE,C_HALF));
   // dog noses: a faint scent circle
-  for (const d of L.dogs) if (d.blind<=0){ ctx.strokeStyle='rgba(200,150,90,0.25)'; ctx.setLineDash([3,5]); ctx.lineWidth=1.5; ctx.beginPath(); ctx.arc(P(d.x),P(d.y),P(DOG_NOSE),0,7); ctx.stroke(); ctx.setLineDash([]); }
+  for (const d of L.dogs) if (d.blind<=0){ ctx.strokeStyle='rgba(200,150,90,0.25)'; ctx.setLineDash([3,5]); ctx.lineWidth=1.5; ctx.beginPath(); ctx.arc(P(d.x),P(d.y),P(L.sneaking?DOG_NOSE_SNEAK:DOG_NOSE),0,7); ctx.stroke(); ctx.setLineDash([]); }
   // cameras
   for (const c of L.cams){
     ctx.save(); ctx.translate(P(c.x),P(c.y)); ctx.rotate(c.ang);
@@ -878,11 +891,13 @@ function draw(){
   if (p.weight>0){ const bs=6+Math.min(p.weight,12); ctx.fillStyle='#6b5a3a';
     ctx.beginPath(); ctx.arc(P(p.x)-Math.cos(p.face)*8,P(p.y)-Math.sin(p.face)*8,bs*0.6,0,7); ctx.fill(); }
   const disg = L.disgT>0;
-  ctx.fillStyle=disg?'#7fa0e0':'#46c37b'; ctx.beginPath(); ctx.arc(P(p.x),P(p.y),9,0,7); ctx.fill();
+  ctx.globalAlpha = L.sneaking ? 0.7 : 1;
+  ctx.fillStyle=disg?'#7fa0e0':'#46c37b'; ctx.beginPath(); ctx.arc(P(p.x),P(p.y),L.sneaking?8:9,0,7); ctx.fill();
   if (disg){ ctx.fillStyle='#1d2a4a'; ctx.fillRect(P(p.x)-8,P(p.y)-9,16,5); }
   else { ctx.fillStyle='#0b0d14'; ctx.fillRect(P(p.x)-6,P(p.y)-3,12,4); }
+  ctx.globalAlpha = 1;
   // noise rings
-  for (const r of L.rings){ ctx.strokeStyle=`rgba(242,193,78,${0.5-r.t*0.8})`; ctx.lineWidth=2;
+  for (const r of L.rings){ ctx.strokeStyle=`rgba(242,193,78,${(r.soft?0.22:0.5)-r.t*(r.soft?0.36:0.8)})`; ctx.lineWidth=r.soft?1:2;
     ctx.beginPath(); ctx.arc(P(r.x),P(r.y),P(r.r)*(r.t/0.6),0,7); ctx.stroke(); }
   // prompts
   ctx.font='bold 12px monospace';
@@ -904,7 +919,7 @@ function drawHUD(p){
   const HUD=V.hud, VWd=V.w;
   ctx.fillStyle='#10141f'; ctx.fillRect(0,0,VWd,HUD);
   ctx.fillStyle='#2a3247'; ctx.fillRect(0,HUD-2,VWd,2);
-  const timers = [L.disgT>0?`UNIFORM ${L.disgT.toFixed(0)}s`:'', L.empT>0?`EMP ${L.empT.toFixed(0)}s`:''].filter(Boolean).join('  ');
+  const timers = [L.sneaking?'SNEAKING':'', L.disgT>0?`UNIFORM ${L.disgT.toFixed(0)}s`:'', L.empT>0?`EMP ${L.empT.toFixed(0)}s`:''].filter(Boolean).join('  ');
   const detCol = L.det>0.66?'#e5484d':L.det>0.33?'#f2a14e':'#f2c14e';
   if (V.narrow){
     const padL = 12, padR = VWd-12;
