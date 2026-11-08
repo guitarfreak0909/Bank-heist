@@ -2,17 +2,37 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <title>Night Shift Heist</title>
 <style>
 :root{--bg:#0b0d14;--fg:#e8e6df;--muted:#8d93a5;--accent:#f2c14e;--danger:#e5484d;--ok:#46c37b;--panel:#151a26;--line:#2a3247}
 *{box-sizing:border-box}
-html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:hidden}
-#wrap{position:relative;width:min(100vw,calc(100vh*1024/700));aspect-ratio:1024/700;margin:0 auto;top:50%;transform:translateY(-50%)}
-canvas{width:100%;height:100%;display:block}
-#ov{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(5,7,12,.86);padding:16px}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:hidden;
+  touch-action:manipulation;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;overscroll-behavior:none}
+#c{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;display:block;touch-action:none}
+#ov{position:fixed;inset:0;display:flex;background:rgba(5,7,12,.88);padding:16px;overflow-y:auto;-webkit-overflow-scrolling:touch;z-index:5}
 #ov.hide{display:none}
-.panel{max-width:760px;width:100%;text-align:center}
+.panel{max-width:760px;width:100%;text-align:center;margin:auto}
+/* touch controls */
+#touch{display:none;position:fixed;inset:0;pointer-events:none;z-index:3}
+body.touch #touch{display:block}
+body.menu #touch{display:none}
+#stick{position:absolute;left:calc(20px + env(safe-area-inset-left));bottom:calc(22px + env(safe-area-inset-bottom));width:140px;height:140px;border-radius:50%;
+  background:rgba(255,255,255,.05);border:2px solid rgba(255,255,255,.16);pointer-events:auto;touch-action:none}
+#stick::after{content:'';position:absolute;inset:-2px;border-radius:50%;border:2px dashed rgba(242,193,78,.25)}
+#knob{position:absolute;left:50%;top:50%;width:58px;height:58px;margin:-29px 0 0 -29px;border-radius:50%;background:rgba(232,230,223,.35);pointer-events:none}
+#knob.sprint{background:rgba(242,193,78,.75)}
+.tb{position:absolute;pointer-events:auto;touch-action:none;border-radius:50%;border:2px solid rgba(255,255,255,.2);background:rgba(21,26,38,.78);
+  color:var(--fg);font:inherit;font-weight:700;font-size:12px;line-height:1.2;padding:0}
+.tb:disabled{opacity:.35}
+.tb.on{background:rgba(242,193,78,.45)}
+#bAct{right:calc(22px + env(safe-area-inset-right));bottom:calc(32px + env(safe-area-inset-bottom));width:92px;height:92px;border-color:var(--accent);background:rgba(242,193,78,.18);font-size:13px}
+#bAct.hot{background:rgba(242,193,78,.5);color:#fff}
+#bSmoke{right:calc(126px + env(safe-area-inset-right));bottom:calc(24px + env(safe-area-inset-bottom));width:62px;height:62px}
+#bEmp{right:calc(40px + env(safe-area-inset-right));bottom:calc(136px + env(safe-area-inset-bottom));width:62px;height:62px}
+#bPause{right:calc(132px + env(safe-area-inset-right));bottom:calc(104px + env(safe-area-inset-bottom));width:46px;height:46px;font-size:14px}
 h1{font-size:clamp(28px,5vw,52px);margin:0 0 4px;color:var(--accent);letter-spacing:2px}
 h2{font-size:clamp(20px,3vw,30px);margin:0 0 8px}
 p{color:var(--muted);line-height:1.5;margin:6px 0}
@@ -30,18 +50,42 @@ button.go:hover{filter:brightness(1.1)}
 .stat{color:var(--fg)}
 .money{color:var(--ok)}
 .bad{color:var(--danger)}
+@media (max-width:520px){.cards{grid-template-columns:1fr 1fr}.card{padding:10px}.card .d{font-size:12px}h2{margin-bottom:4px}.keys{font-size:12px}}
 </style>
 </head>
 <body>
-<div id="wrap">
-  <canvas id="c" width="1024" height="700"></canvas>
-  <div id="ov"><div class="panel" id="panel"></div></div>
+<canvas id="c"></canvas>
+<div id="touch">
+  <div id="stick"><div id="knob"></div></div>
+  <button class="tb" id="bAct">ACT</button>
+  <button class="tb" id="bSmoke">SMOKE<br>1</button>
+  <button class="tb" id="bEmp">EMP<br>0</button>
+  <button class="tb" id="bPause">II</button>
 </div>
+<div id="ov"><div class="panel" id="panel"></div></div>
 <script>
 // ---------- constants & helpers ----------
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 const ov = document.getElementById('ov'), panel = document.getElementById('panel');
-const T = 32, W = 32, H = 20, HUD = 60;
+const T = 32, W = 32, H = 20;
+// ---------- layout / camera ----------
+let TOUCH = matchMedia('(pointer:coarse)').matches || 'ontouchstart' in window;
+const V = {w:0,h:0,dpr:1,hud:60,vx:0,vy:60,vw:0,vh:0,scale:1,narrow:false};
+function layout(){
+  V.dpr = Math.min(window.devicePixelRatio||1, 2);
+  V.w = innerWidth; V.h = innerHeight;
+  cv.width = Math.round(V.w*V.dpr); cv.height = Math.round(V.h*V.dpr);
+  V.narrow = V.w < 700;
+  V.hud = V.narrow ? 62 : 60;
+  const portraitTouch = TOUCH && V.h > V.w;
+  const ctrl = portraitTouch ? 200 : 0;           // reserve space for controls under the map in portrait
+  V.vx = 0; V.vy = V.hud; V.vw = V.w; V.vh = Math.max(120, V.h - V.hud - ctrl);
+  const fit = Math.min(V.vw/(W*T), V.vh/(H*T));
+  V.scale = TOUCH ? Math.max(fit, 0.85) : Math.min(fit, 1.6);
+  document.body.classList.toggle('touch', TOUCH);
+}
+addEventListener('resize', layout);
+addEventListener('orientationchange', () => setTimeout(layout, 200));
 const DIRS = [[1,0],[-1,0],[0,1],[0,-1]];
 const rnd = (a,b) => a + Math.random()*(b-a);
 const ri = (a,b) => Math.floor(rnd(a,b+1));
@@ -56,8 +100,8 @@ const UPG = [
   {id:'shoes',   name:'Soft Sneakers',     desc:'+15% move speed',                cost:1500, apply:g=>g.speed*=1.15},
   {id:'bag',     name:'Reinforced Duffel', desc:'Loot slows you 40% less',        cost:2000, apply:g=>g.bagMult*=0.6},
   {id:'drill',   name:'Thermal Drill',     desc:'Crack vaults 40% faster',        cost:2000, apply:g=>g.crack*=0.6},
-  {id:'smoke',   name:'Smoke Bombs x2',    desc:'[Q] Cloud that blinds guards & cameras', cost:1000, apply:g=>g.smoke+=2},
-  {id:'emp',     name:'EMP Charge',        desc:'[F] Kill all cameras for 10s',   cost:1200, apply:g=>g.emp+=1},
+  {id:'smoke',   name:'Smoke Bombs x2',    desc:'Cloud that blinds guards & cameras', cost:1000, apply:g=>g.smoke+=2},
+  {id:'emp',     name:'EMP Charge',        desc:'Kill all cameras for 10s',   cost:1200, apply:g=>g.emp+=1},
   {id:'kevlar',  name:'Kevlar Vest',       desc:'+1 life',                        cost:2500, apply:g=>g.lives+=1},
   {id:'shadow',  name:'Shadow Training',   desc:'Get spotted 25% slower',         cost:2500, apply:g=>g.stealth*=0.75},
   {id:'dispatch',name:'Bribed Dispatcher', desc:'+12s before police arrive',      cost:1500, apply:g=>g.policeBonus+=12},
@@ -256,12 +300,14 @@ function update(dt){
   let mx=0,my=0;
   if (keys.KeyW||keys.ArrowUp) my--; if (keys.KeyS||keys.ArrowDown) my++;
   if (keys.KeyA||keys.ArrowLeft) mx--; if (keys.KeyD||keys.ArrowRight) mx++;
-  const sprint = keys.ShiftLeft||keys.ShiftRight;
+  let analog = 1, stickSprint = false;
+  if (stick.active && stick.mag > 0.15){ mx = stick.x; my = stick.y; analog = Math.min(1, stick.mag/0.7); stickSprint = stick.mag > 0.93; }
+  const sprint = keys.ShiftLeft||keys.ShiftRight||stickSprint;
   const moving = mx||my;
   if (moving){
     const m = Math.hypot(mx,my); mx/=m; my/=m; p.face=Math.atan2(my,mx);
     const slow = Math.max(0.45, 1 - p.weight*0.045*G.bagMult);
-    const sp = 3.4 * G.speed * slow * (sprint?1.6:1);
+    const sp = 3.4 * G.speed * slow * (sprint?1.6:analog);
     const nx=p.x+mx*sp*dt; if (!hitsWall(nx,p.y,0.3)) p.x=nx;
     const ny=p.y+my*sp*dt; if (!hitsWall(p.x,ny,0.3)) p.y=ny;
     if (sprint){ L.noiseT += dt; if (L.noiseT>0.4){ L.noiseT=0; noise(p.x,p.y,3.4*G.quiet); } }
@@ -270,7 +316,7 @@ function update(dt){
   for (const c of L.cash) if (!c.taken && dist(c,p)<0.6){ c.taken=true; p.carry+=c.val; p.weight+=1; say(c.x,c.y,'+'+fmt(c.val),'#46c37b'); }
   // safe cracking
   const s = L.safe;
-  if (!s.done && dist(s,p)<1.2 && (keys.KeyE||keys.Space)){
+  if (!s.done && dist(s,p)<1.2 && (keys.KeyE||keys.Space||touchAct)){
     s.prog += dt/(4.5*G.crack);
     L.drillT += dt; if (L.drillT>1.1){ L.drillT=0; noise(s.x,s.y,3.6); }
     if (s.prog>=1){ s.done=true; p.carry+=s.val; p.weight+=4; say(s.x,s.y-0.6,'VAULT +'+fmt(s.val),'#f2c14e'); }
@@ -358,32 +404,83 @@ addEventListener('keydown', e => {
   keys[e.code]=true;
   if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
   if (state!=='play' || e.repeat) return;
-  const p = L.player;
-  if ((e.code==='KeyE'||e.code==='Space') && dist(p,L.van)<1.3) escapeFloor();
-  if (e.code==='KeyQ' && G.smoke>0){ G.smoke--; L.smokes.push({x:p.x,y:p.y,r:2.4,t:6}); say(p.x,p.y-1,'SMOKE','#aab'); }
-  if (e.code==='KeyF' && G.emp>0){ G.emp--; L.empT=10; say(p.x,p.y-1,'EMP','#6cf'); }
+  if (e.code==='KeyE'||e.code==='Space') doAct();
+  if (e.code==='KeyQ') doSmoke();
+  if (e.code==='KeyF') doEmp();
   if (e.code==='Escape') togglePause();
 });
+function doAct(){ if (state==='play' && dist(L.player,L.van)<1.3) escapeFloor(); }
+function doSmoke(){ if (state!=='play'||G.smoke<=0) return; const p=L.player; G.smoke--; L.smokes.push({x:p.x,y:p.y,r:2.4,t:6}); say(p.x,p.y-1,'SMOKE','#aab'); }
+function doEmp(){ if (state!=='play'||G.emp<=0) return; const p=L.player; G.emp--; L.empT=10; say(p.x,p.y-1,'EMP','#6cf'); }
+
+// touch: joystick + buttons
+const stick = {active:false,id:null,x:0,y:0,mag:0};
+let touchAct = false;
+const stickEl = document.getElementById('stick'), knob = document.getElementById('knob');
+const bAct = document.getElementById('bAct'), bSmoke = document.getElementById('bSmoke'), bEmp = document.getElementById('bEmp');
+function stickMove(e){
+  const r = stickEl.getBoundingClientRect(), R = r.width/2;
+  let dx = e.clientX-(r.left+R), dy = e.clientY-(r.top+R);
+  const d = Math.hypot(dx,dy), lim = Math.min(d, R);
+  if (d>0){ dx = dx/d*lim; dy = dy/d*lim; }
+  stick.x = dx/R; stick.y = dy/R; stick.mag = lim/R;
+  knob.style.transform = `translate(${dx}px,${dy}px)`;
+  knob.classList.toggle('sprint', stick.mag>0.93);
+}
+function stickEnd(e){
+  if (e.pointerId!==stick.id) return;
+  stick.active=false; stick.id=null; stick.x=stick.y=stick.mag=0;
+  knob.style.transform=''; knob.classList.remove('sprint');
+}
+stickEl.addEventListener('pointerdown', e => { e.preventDefault(); stick.active=true; stick.id=e.pointerId; stickEl.setPointerCapture(e.pointerId); stickMove(e); });
+stickEl.addEventListener('pointermove', e => { if (e.pointerId===stick.id) stickMove(e); });
+stickEl.addEventListener('pointerup', stickEnd);
+stickEl.addEventListener('pointercancel', stickEnd);
+bAct.addEventListener('pointerdown', e => { e.preventDefault(); bAct.setPointerCapture(e.pointerId); touchAct=true; bAct.classList.add('on'); doAct(); });
+const actUp = () => { touchAct=false; bAct.classList.remove('on'); };
+bAct.addEventListener('pointerup', actUp); bAct.addEventListener('pointercancel', actUp);
+bSmoke.addEventListener('pointerdown', e => { e.preventDefault(); doSmoke(); });
+bEmp.addEventListener('pointerdown', e => { e.preventDefault(); doEmp(); });
+document.getElementById('bPause').addEventListener('pointerdown', e => { e.preventDefault(); togglePause(); });
+addEventListener('touchstart', () => { if (!TOUCH){ TOUCH=true; layout(); if (state==='title') showTitle(); } }, {passive:true});
+addEventListener('contextmenu', e => e.preventDefault());
+let uiCache='';
+function syncTouchUI(){
+  if (!TOUCH || state!=='play') return;
+  const p=L.player, s=L.safe;
+  const lbl = dist(p,L.van)<1.3 ? 'ESCAPE' : (!s.done && dist(s,p)<1.2) ? 'HOLD<br>CRACK' : 'ACT';
+  const key = lbl+G.smoke+'|'+G.emp;
+  if (key===uiCache) return; uiCache=key;
+  bAct.innerHTML = lbl; bAct.classList.toggle('hot', lbl!=='ACT');
+  bSmoke.innerHTML = `SMOKE<br>${G.smoke}`; bSmoke.disabled = G.smoke<=0;
+  bEmp.innerHTML = `EMP<br>${G.emp}`; bEmp.disabled = G.emp<=0;
+}
 addEventListener('keyup', e => { keys[e.code]=false; });
-addEventListener('blur', () => { for (const k in keys) keys[k]=false; if (state==='play') togglePause(); });
+addEventListener('blur', () => { for (const k in keys) keys[k]=false; touchAct=false; if (state==='play') togglePause(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && state==='play') togglePause(); });
 
 // ---------- flow ----------
-function setOverlay(html){ panel.innerHTML=html; ov.classList.remove('hide'); }
-function hideOverlay(){ ov.classList.add('hide'); }
+function setOverlay(html){ panel.innerHTML=html; ov.classList.remove('hide'); ov.scrollTop=0; document.body.classList.add('menu'); }
+function hideOverlay(){ ov.classList.add('hide'); document.body.classList.remove('menu'); uiCache=''; }
 
 function showTitle(){
   state='title';
   setOverlay(`
     <h1>NIGHT SHIFT HEIST</h1>
     <p>Five banks. One crew of one. Every run is a new layout.</p>
-    <div class="keys">
+    ${TOUCH ? `<div class="keys">
+      <b>Left stick</b><span>Move · push to the edge to sprint (noisy)</span>
+      <b>ACT</b><span>Hold to crack the vault · tap at the van to escape</span>
+      <b>SMOKE / EMP</b><span>Blind guards · kill cameras</span>
+      <b>II</b><span>Pause</span>
+    </div>` : `<div class="keys">
       <b>WASD / Arrows</b><span>Move</span>
       <b>Shift</b><span>Sprint (noisy)</span>
       <b>E / Space</b><span>Hold to crack the vault · tap at the van to escape</span>
       <b>Q</b><span>Smoke bomb</span>
       <b>F</b><span>EMP (cameras)</span>
       <b>Esc</b><span>Pause</span>
-    </div>
+    </div>`}
     <p>Grab cash, crack the vault, get back to the van. Heavy bags slow you down.<br>
     Stay out of vision cones. If the alarm trips, the police clock starts.<br>
     Escape with no alarm for a <span class="money">+25% ghost bonus</span>. Spend your take between jobs.</p>
@@ -462,9 +559,14 @@ panel.addEventListener('click', e => {
 
 // ---------- render ----------
 function draw(){
-  ctx.fillStyle='#0b0d14'; ctx.fillRect(0,0,cv.width,cv.height);
+  ctx.setTransform(V.dpr,0,0,V.dpr,0,0);
+  ctx.fillStyle='#0b0d14'; ctx.fillRect(0,0,V.w,V.h);
   if (!L) return;
-  ctx.save(); ctx.translate(0,HUD);
+  const sc=V.scale, mw=W*T*sc, mh=H*T*sc;
+  const camX = mw<=V.vw ? (V.vw-mw)/2 : Math.min(0, Math.max(V.vw-mw, V.vw/2 - L.player.x*T*sc));
+  const camY = mh<=V.vh ? (V.vh-mh)/2 : Math.min(0, Math.max(V.vh-mh, V.vh/2 - L.player.y*T*sc));
+  ctx.save(); ctx.beginPath(); ctx.rect(V.vx,V.vy,V.vw,V.vh); ctx.clip();
+  ctx.translate(V.vx+camX, V.vy+camY); ctx.scale(sc,sc);
   // tiles
   for (let y=0;y<H;y++) for (let x=0;x<W;x++){
     if (grid[y][x]){
@@ -477,7 +579,7 @@ function draw(){
   }
   const P = v => v*T;
   // van
-  const v=L.van, nearVan = dist(L.player,v)<1.3;
+  const v=L.van, nearVan = dist(L.player,v)<1.3, K = TOUCH?'ACT':'[E]';
   ctx.fillStyle='#2f6b4a'; ctx.fillRect(P(v.x)-14,P(v.y)-12,28,24);
   ctx.fillStyle='#bfe8cf'; ctx.font='bold 9px monospace'; ctx.textAlign='center'; ctx.fillText('VAN',P(v.x),P(v.y)+3);
   // cash
@@ -531,25 +633,46 @@ function draw(){
     ctx.beginPath(); ctx.arc(P(r.x),P(r.y),P(r.r)*(r.t/0.6),0,7); ctx.stroke(); }
   // prompts
   ctx.font='bold 12px monospace'; ctx.textAlign='center';
-  if (nearVan){ ctx.fillStyle='#bfe8cf'; ctx.fillText(`[E] ESCAPE with ${fmt(p.carry)}`,P(v.x)+40,P(v.y)-18); }
-  if (!s.done && dist(s,p)<1.2){ ctx.fillStyle='#f2c14e'; ctx.fillText('HOLD [E] to crack', P(s.x), P(s.y)-26); }
+  if (nearVan){ ctx.fillStyle='#bfe8cf'; ctx.fillText(`${K} ESCAPE with ${fmt(p.carry)}`,P(v.x)+40,P(v.y)-18); }
+  if (!s.done && dist(s,p)<1.2){ ctx.fillStyle='#f2c14e'; ctx.fillText(`HOLD ${K} to crack`, P(s.x), P(s.y)-26); }
   // floating text
   for (const t of L.texts){ ctx.globalAlpha=Math.min(1,t.t); ctx.fillStyle=t.color; ctx.font='bold 13px monospace'; ctx.fillText(t.txt,P(t.x),P(t.y)); }
   ctx.globalAlpha=1;
   ctx.restore();
 
   // alarm vignette
-  if (L.alarm){ const a=0.12+0.1*Math.sin(L.time*8); ctx.strokeStyle=`rgba(229,72,77,${a})`; ctx.lineWidth=18; ctx.strokeRect(9,HUD+9,cv.width-18,cv.height-HUD-18); }
-  if (L.flash>0){ ctx.fillStyle=`rgba(229,72,77,${L.flash*0.5})`; ctx.fillRect(0,HUD,cv.width,cv.height-HUD); }
+  if (L.alarm){ const a=0.12+0.1*Math.sin(L.time*8); ctx.strokeStyle=`rgba(229,72,77,${a})`; ctx.lineWidth=14; ctx.strokeRect(V.vx+7,V.vy+7,V.vw-14,V.vh-14); }
+  if (L.flash>0){ ctx.fillStyle=`rgba(229,72,77,${L.flash*0.5})`; ctx.fillRect(V.vx,V.vy,V.vw,V.vh); }
+  drawHUD(p);
+}
 
-  // HUD
-  ctx.fillStyle='#10141f'; ctx.fillRect(0,0,cv.width,HUD);
-  ctx.fillStyle='#2a3247'; ctx.fillRect(0,HUD-2,cv.width,2);
+function drawHUD(p){
+  const HUD=V.hud, VWd=V.w;
+  ctx.fillStyle='#10141f'; ctx.fillRect(0,0,VWd,HUD);
+  ctx.fillStyle='#2a3247'; ctx.fillRect(0,HUD-2,VWd,2);
+  if (V.narrow){
+    const padL = 12, padR = VWd-12;
+    ctx.textAlign='left'; ctx.font='bold 14px monospace'; ctx.fillStyle='#f2c14e';
+    ctx.fillText(`JOB ${G.floor+1}/${BANKS.length}`,padL,22);
+    ctx.fillStyle='#e5484d'; ctx.fillText(`${'♥'.repeat(Math.min(G.lives,5))}`,padL+92,22);
+    ctx.textAlign='right'; ctx.fillStyle='#46c37b'; ctx.fillText(`BAG ${fmt(p.carry)}`,padR,22);
+    ctx.font='12px monospace'; ctx.fillText(`STASH ${fmt(G.bank)}`,padR,46);
+    const bw = Math.max(90, VWd*0.5);
+    ctx.textAlign='left';
+    if (L.alarm){ ctx.fillStyle='#e5484d'; ctx.font='bold 14px monospace'; ctx.fillText(`POLICE ${Math.max(0,L.police).toFixed(1)}s`,padL,47); }
+    else {
+      ctx.fillStyle='#232a3b'; ctx.fillRect(padL,37,bw,10);
+      ctx.fillStyle=L.det>0.66?'#e5484d':L.det>0.33?'#f2a14e':'#f2c14e'; ctx.fillRect(padL,37,bw*Math.min(1,L.det),10);
+      if (L.empT>0){ ctx.fillStyle='#6cf'; ctx.font='11px monospace'; ctx.fillText(`EMP ${L.empT.toFixed(0)}s`,padL+bw+8,47); }
+    }
+    return;
+  }
+
   ctx.textAlign='left'; ctx.font='bold 15px monospace'; ctx.fillStyle='#f2c14e';
   ctx.fillText(`JOB ${G.floor+1}/${BANKS.length}`,16,24);
   ctx.font='13px monospace'; ctx.fillStyle='#8d93a5'; ctx.fillText(BANKS[G.floor],16,44);
   // center: detection / alarm
-  const cx=cv.width/2;
+  const cx=VWd/2;
   ctx.textAlign='center';
   if (L.alarm){
     ctx.fillStyle='#e5484d'; ctx.font='bold 20px monospace';
@@ -561,9 +684,9 @@ function draw(){
     if (L.empT>0){ ctx.fillStyle='#6cf'; ctx.fillText(`EMP ${L.empT.toFixed(1)}s`,cx,52); }
   }
   ctx.textAlign='right'; ctx.font='bold 14px monospace';
-  ctx.fillStyle='#46c37b'; ctx.fillText(`BAG ${fmt(p.carry)}  STASH ${fmt(G.bank)}`,cv.width-16,24);
+  ctx.fillStyle='#46c37b'; ctx.fillText(`BAG ${fmt(p.carry)}  STASH ${fmt(G.bank)}`,VWd-16,24);
   ctx.fillStyle='#e8e6df'; ctx.font='13px monospace';
-  ctx.fillText(`♥ ${G.lives}   [Q] Smoke ${G.smoke}   [F] EMP ${G.emp}`,cv.width-16,44);
+  ctx.fillText(TOUCH ? `♥ ${G.lives}` : `♥ ${G.lives}   [Q] Smoke ${G.smoke}   [F] EMP ${G.emp}`,VWd-16,44);
 }
 
 // ---------- loop ----------
@@ -571,9 +694,11 @@ let last=performance.now();
 function frame(now){
   const dt=Math.min(0.05,(now-last)/1000); last=now;
   if (state==='play') update(dt);
+  syncTouchUI();
   draw();
   requestAnimationFrame(frame);
 }
+layout();
 showTitle();
 requestAnimationFrame(frame);
 </script>
